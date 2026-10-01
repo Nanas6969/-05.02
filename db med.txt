@@ -1,0 +1,183 @@
+-- 1. Создание базы данных
+CREATE DATABASE SUMR_ZP;
+GO
+
+USE SUMR_ZP;
+GO
+
+-- 2. Таблица «Специальности сотрудников» (Specialties) [Раздел 2.2, 4]
+CREATE TABLE Specialties (
+    SpecialtyID INT IDENTITY(1,1) PRIMARY KEY,
+    Title NVARCHAR(100) NOT NULL,                                  -- Название специальности
+    BaseHourlyRate DECIMAL(10, 2) NOT NULL CHECK (BaseHourlyRate >= 0) -- Базовая ставка за час
+);
+GO
+
+-- 3. Таблица «Отделения / Подразделения» (Departments) [Раздел 2.1]
+CREATE TABLE Departments (
+    DepartmentID INT IDENTITY(1,1) PRIMARY KEY,
+    DepartmentName NVARCHAR(100) NOT NULL
+);
+GO
+
+-- 4. Таблица «Сотрудники» (Employees) [Раздел 2.1, 4]
+CREATE TABLE Employees (
+    EmployeeID INT IDENTITY(1,1) PRIMARY KEY,
+    FullName NVARCHAR(150) NOT NULL,                               -- ФИО
+    Phone NVARCHAR(20) NULL,                                       -- Телефон
+    Email NVARCHAR(100) NULL,                                      -- E-mail
+    SpecialtyID INT NOT NULL,                                      -- Внешний ключ на специальность
+    DepartmentID INT NOT NULL,                                     -- Внешний ключ на отделение[cite: 1]
+    EmploymentType NVARCHAR(50) NOT NULL DEFAULT 'Основное место'  -- Основное место / Совместительство[cite: 1]
+        CHECK (EmploymentType IN ('Основное место', 'Совместительство')),
+    HourlyRate DECIMAL(10, 2) NOT NULL CHECK (HourlyRate >= 0),    -- Индивидуальная часовая ставка / оклад[cite: 1]
+    HireDate DATE NOT NULL DEFAULT GETDATE(),                       -- Дата приема[cite: 1]
+    IsArchived BIT NOT NULL DEFAULT 0,                             -- Флаг архивации (без потери истории)[cite: 1]
+    
+    CONSTRAINT FK_Employees_Specialties FOREIGN KEY (SpecialtyID) 
+        REFERENCES Specialties(SpecialtyID),
+    CONSTRAINT FK_Employees_Departments FOREIGN KEY (DepartmentID) 
+        REFERENCES Departments(DepartmentID)
+);
+GO
+
+-- 5. Таблица «График работы» (Schedules) [Раздел 2.3, 4]
+CREATE TABLE Schedules (
+    ScheduleID INT IDENTITY(1,1) PRIMARY KEY,
+    EmployeeID INT NOT NULL,                                       -- Внешний ключ на сотрудника[cite: 1]
+    ShiftDate DATE NOT NULL,                                       -- Дата смены[cite: 1]
+    ShiftType NVARCHAR(20) NOT NULL                                -- Тип смены (День, Ночь, Сутки)[cite: 1]
+        CHECK (ShiftType IN ('День', 'Ночь', 'Сутки')),
+    HoursWorked DECIMAL(4, 2) NOT NULL DEFAULT 0 CHECK (HoursWorked >= 0), -- Отработано часов[cite: 1]
+    ShiftStatus NVARCHAR(30) NOT NULL DEFAULT 'Отработано'        -- Статус (Отработано, Больничный, Отпуск, Прогул)[cite: 1]
+        CHECK (ShiftStatus IN ('Отработано', 'Больничный', 'Отпуск', 'Прогул')),
+    
+    CONSTRAINT FK_Schedules_Employees FOREIGN KEY (EmployeeID) 
+        REFERENCES Employees(EmployeeID),
+    -- Контроль пересечений: защита от назначения сотрудника на две смены в один день [Раздел 2.3]
+    CONSTRAINT UQ_Employee_ShiftDate UNIQUE (EmployeeID, ShiftDate)
+);
+GO
+
+-- 6. Таблица «Расчёт заработной платы» (Payroll) [Раздел 2.4, 4]
+CREATE TABLE Payroll (
+    PayrollID INT IDENTITY(1,1) PRIMARY KEY,
+    EmployeeID INT NOT NULL,                                       -- Внешний ключ на сотрудника[cite: 1]
+    PayMonth INT NOT NULL CHECK (PayMonth BETWEEN 1 AND 12),       -- Месяц расчёта[cite: 1]
+    PayYear INT NOT NULL CHECK (PayYear >= 2000),                   -- Год расчёта[cite: 1]
+    TotalHours DECIMAL(6, 2) NOT NULL DEFAULT 0,                   -- Всего часов[cite: 1]
+    TotalAmount DECIMAL(12, 2) NOT NULL DEFAULT 0,                 -- Итоговая сумма ЗП[cite: 1]
+    CalculationDate DATETIME NOT NULL DEFAULT GETDATE(),            -- Дата проведения расчёта[cite: 1]
+    
+    CONSTRAINT FK_Payroll_Employees FOREIGN KEY (EmployeeID) 
+        REFERENCES Employees(EmployeeID),
+    -- Защита от создания дубликатов расчёта за один и тот же период
+    CONSTRAINT UQ_Employee_Period UNIQUE (EmployeeID, PayMonth, PayYear)
+);
+GO
+
+-- ============================================================================
+-- ДОПОЛНИТЕЛЬНАЯ ЛОГИКА (Процедуры и Представления)
+-- ============================================================================
+
+-- Представление для отображения сводной информации по сменам [Раздел 2.3]
+CREATE VIEW vw_ScheduleDetails AS
+SELECT 
+    s.ScheduleID,
+    e.FullName,
+    spec.Title AS Specialty,
+    d.DepartmentName,
+    s.ShiftDate,
+    s.ShiftType,
+    s.HoursWorked,
+    s.ShiftStatus
+FROM Schedules s
+JOIN Employees e ON s.EmployeeID = e.EmployeeID
+JOIN Specialties spec ON e.SpecialtyID = spec.SpecialtyID
+JOIN Departments d ON e.DepartmentID = d.DepartmentID;
+GO
+
+-- Хранимая процедура для автоматического расчёта заработной платы [Раздел 2.4]
+-- Формула: Итоговая ЗП = (Часы * Ставка) + Коэффициент за ночные смены (1.2)[cite: 1]
+CREATE PROCEDURE sp_CalculateMonthlyPayroll
+    @TargetMonth INT,
+    @TargetYear INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Удаляем предыдущий расчёт за указанный месяц, если выполняется перерасчёт
+    DELETE FROM Payroll 
+    WHERE PayMonth = @TargetMonth AND PayYear = @TargetYear;
+
+    -- Расчёт и сохранение итогов
+    INSERT INTO Payroll (EmployeeID, PayMonth, PayYear, TotalHours, TotalAmount, CalculationDate)
+    SELECT 
+        e.EmployeeID,
+        @TargetMonth,
+        @TargetYear,
+        ISNULL(SUM(s.HoursWorked), 0) AS TotalHours,
+        ISNULL(SUM(
+            s.HoursWorked * e.HourlyRate * 
+            CASE 
+                WHEN s.ShiftType = 'Ночь' THEN 1.20 -- Надбавка 20% за ночные смены [Раздел 2.4]
+                ELSE 1.00 
+            END
+        ), 0) AS TotalAmount,
+        GETDATE()
+    FROM Employees e
+    LEFT JOIN Schedules s ON e.EmployeeID = s.EmployeeID 
+        AND MONTH(s.ShiftDate) = @TargetMonth 
+        AND YEAR(s.ShiftDate) = @TargetYear
+        AND s.ShiftStatus = 'Отработано' -- Учитываются только фактически отработанные смены[cite: 1]
+    WHERE e.IsArchived = 0 -- Исключаем архивированных сотрудников[cite: 1]
+    GROUP BY e.EmployeeID;
+END;
+GO
+
+-- ============================================================================
+-- ЗАПОЛНЕНИЕ ТЕСТОВЫМИ ДАННЫМИ И ПРОВЕРКА РАБОТЫ
+-- ============================================================
+
+-- 1. Добавление специальностей [Раздел 2.2]
+INSERT INTO Specialties (Title, BaseHourlyRate) VALUES
+(N'Врач-терапевт', 450.00),
+(N'Хирург', 650.00),
+(N'Процедурная медсестра', 300.00),
+(N'Санитар', 200.00);
+
+-- 2. Добавление отделений [Раздел 2.1]
+INSERT INTO Departments (DepartmentName) VALUES
+(N'Терапевтическое отделение'),
+(N'Хирургическое отделение'),
+(N'Приёмное отделение');
+
+-- 3. Добавление сотрудников [Раздел 2.1]
+INSERT INTO Employees (FullName, Phone, Email, SpecialtyID, DepartmentID, EmploymentType, HourlyRate, HireDate) VALUES
+(N'Иванов Иван Иванович', '+79991112233', 'ivanov@med.ru', 1, 1, N'Основное место', 450.00, '2023-01-15'),
+(N'Петрова Анна Сергеевна', '+79992223344', 'petrova@med.ru', 3, 1, N'Основное место', 300.00, '2023-03-01'),
+(N'Сидоров Алексей Владимирович', '+79993334455', 'sidorov@med.ru', 2, 2, N'Совместительство', 700.00, '2022-11-10');
+
+-- 4. Назначение смен в график [Раздел 2.3]
+INSERT INTO Schedules (EmployeeID, ShiftDate, ShiftType, HoursWorked, ShiftStatus) VALUES
+(1, '2026-10-01', N'День', 8.0, N'Отработано'),
+(1, '2026-10-02', N'День', 8.0, N'Отработано'),
+(1, '2026-10-03', N'Ночь', 12.0, N'Отработано'),
+(2, '2026-10-01', N'День', 8.0, N'Отработано'),
+(2, '2026-10-02', N'День', 8.0, N'Больничный'), -- Больничный не пойдёт в суммарную оплату[cite: 1]
+(3, '2026-10-01', N'Сутки', 24.0, N'Отработано');
+
+-- 5. Запуск автоматического расчёта ЗП за Октябрь 2026 года [Раздел 2.4]
+EXEC sp_CalculateMonthlyPayroll @TargetMonth = 10, @TargetYear = 2026;
+
+-- 6. Просмотр итоговой ведомости расчёта ЗП [Раздел 2.4]
+SELECT 
+    p.PayrollID,
+    e.FullName,
+    p.PayMonth,
+    p.PayYear,
+    p.TotalHours,
+    p.TotalAmount,
+    p.CalculationDate
+FROM Payroll p
+JOIN Employees e ON p.EmployeeID = e.EmployeeID;
