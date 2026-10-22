@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QLabel, QLineEdit, QComboBox,
     QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton, QGroupBox,
-    QMessageBox, QHeaderView, QDialog, QFormLayout
+    QMessageBox, QHeaderView, QDialog, QFormLayout, QFileDialog
 )
 from PyQt6.QtCore import Qt
 
@@ -107,13 +107,18 @@ class MedicalApp(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
 
-        # --- 1. Панель поиска ---
+        # --- 1. Панель поиска и экспорта ---
         search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Поиск (ФИО / Отделение / Специальность):"))
+        search_layout.addWidget(QLabel("Поиск:"))
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Введите текст для фильтрации...")
+        self.txt_search.setPlaceholderText("Введите ФИО, отделение или специальность...")
         self.txt_search.textChanged.connect(self.filter_table)
         search_layout.addWidget(self.txt_search)
+
+        btn_export = QPushButton("Экспорт в Excel")
+        btn_export.clicked.connect(self.export_to_excel)
+        search_layout.addWidget(btn_export)
+
         main_layout.addLayout(search_layout)
 
         # --- 2. Таблица сотрудников ---
@@ -240,6 +245,58 @@ class MedicalApp(QMainWindow):
                 query in emp.specialization.lower()
             )
             self.table.setRowHidden(row, not match)
+
+    def export_to_excel(self):
+        """Экспорт данных таблицы в Excel файл"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить отчет в Excel",
+            "medical_staff.xlsx",
+            "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            import openpyxl
+        except ImportError:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                "Для экспорта в Excel необходима библиотека openpyxl.\nУстановите её командой: pip install openpyxl"
+            )
+            return
+
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Медицинский персонал"
+
+            # Заголовки таблицы
+            headers = [
+                "ID", "ФИО Врача", "Отделение", "Специализация", 
+                "Категория", "Ставка", "Оклад", "Итого с коэф.", "На смене"
+            ]
+            ws.append(headers)
+
+            # Выгружаем только видимые (отфильтрованные) строки
+            for row in range(self.table.rowCount()):
+                if self.table.isRowHidden(row):
+                    continue
+                row_data = []
+                for col in range(self.table.columnCount()):
+                    item = self.table.item(row, col)
+                    row_data.append(item.text() if item else "")
+                ws.append(row_data)
+
+            wb.save(file_path)
+            QMessageBox.information(
+                self, 
+                "Успех", 
+                f"Данные успешно экспортированы!\nФайл сохранен по пути:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл:\n{str(e)}")
 
     def add_employee(self):
         name = self.txt_name.text().strip()
@@ -390,7 +447,6 @@ if __name__ == "__main__":
     # Показываем окно авторизации
     login_dialog = LoginDialog(cursor, conn)
     if login_dialog.exec() == QDialog.DialogCode.Accepted:
-        # Если вошли успешно, передаем коннект и курсор внутрь главного окна через аргументы
         window = MedicalApp(login_dialog.username, login_dialog.user_role, conn, cursor)
         window.show()
         
